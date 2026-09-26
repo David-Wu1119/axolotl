@@ -40,6 +40,45 @@ class DistributedParallelMixin(Trainer):
                     model._axolotl_native_nvfp4_ddp_prepared = True
         return super()._wrap_model(model, *args, **kwargs)
 
+    def _ep_full_param_experts(self) -> bool:
+        cfg = getattr(self, "axolotl_cfg", None)
+        if not cfg or (getattr(cfg, "expert_parallel_size", 1) or 1) <= 1:
+            return False
+        if getattr(cfg, "adapter", None) or not self.is_fsdp_enabled:
+            return False
+        from axolotl.integrations.expert_parallel.shard import _detect_experts_modules
+
+        return any(
+            getattr(m, "num_experts_global", m.num_experts) > m.num_experts
+            for _n, m in _detect_experts_modules(self.model)
+        )
+
+    def save_model(self, output_dir: str | None = None, _internal_call: bool = False):
+        if not self._ep_full_param_experts():
+            return super().save_model(output_dir, _internal_call)
+
+        # The FSDP full state dict holds only this rank's ep-slice of the experts; gather them
+        # across the EP axis on every rank before rank 0 writes.
+        from axolotl.integrations.expert_parallel.plugin import ExpertParallelPlugin
+        from axolotl.integrations.expert_parallel.shard import (
+            gather_ep_experts_into_state_dict,
+        )
+
+        ep_group = ExpertParallelPlugin._resolve_ep_group(self.axolotl_cfg)
+        accelerator = self.accelerator
+        orig_get_state_dict = accelerator.get_state_dict
+
+        def _get_state_dict(model, unwrap=True):
+            state_dict = orig_get_state_dict(model, unwrap=unwrap)
+            gather_ep_experts_into_state_dict(state_dict, model, ep_group)
+            return state_dict
+
+        accelerator.get_state_dict = _get_state_dict
+        try:
+            return super().save_model(output_dir, _internal_call)
+        finally:
+            accelerator.__dict__.pop("get_state_dict", None)
+
     def _save(self, output_dir: str | None = None, state_dict=None):
         if (
             state_dict is None
