@@ -1173,8 +1173,12 @@ class TestEpClipGradNormPatchGate:
         from types import SimpleNamespace
 
         return SimpleNamespace(
-            parallelism_config=SimpleNamespace(
-                ep_enabled=ep, dp_shard_enabled=dp_shard, cp_enabled=cp
+            parallelism_config=(
+                None
+                if ep == "env"
+                else SimpleNamespace(
+                    ep_enabled=ep, dp_shard_enabled=dp_shard, cp_enabled=cp
+                )
             ),
             is_fsdp2=fsdp2,
             unscale_gradients=lambda: None,
@@ -1188,6 +1192,9 @@ class TestEpClipGradNormPatchGate:
             (True, False, True, False, True),
             (True, False, False, False, False),
             (False, False, False, True, False),
+            # pure EP: no ParallelismConfig at all, only the env var
+            ("env", False, False, True, True),
+            ("env", False, False, False, False),
         ],
     )
     def test_gate(self, monkeypatch, ep, dp_shard, cp, fsdp2, expect_ep_aware):
@@ -1195,6 +1202,10 @@ class TestEpClipGradNormPatchGate:
 
         from axolotl.monkeypatch.accelerate import parallelism_config as pc_mod
 
+        if ep == "env":
+            monkeypatch.setenv("PARALLELISM_CONFIG_EP_SIZE", "2")
+        else:
+            monkeypatch.delenv("PARALLELISM_CONFIG_EP_SIZE", raising=False)
         calls = []
         monkeypatch.setattr(
             Accelerator,
